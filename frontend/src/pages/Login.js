@@ -18,7 +18,7 @@ function Login() {
       const res = await loginUser(form);
       setToken(res.data.token);
       localStorage.setItem("user", JSON.stringify(res.data.user));
-      navigate("/home"); // redirect after login
+      navigate("/dashboard"); // redirect after login
     } catch (err) {
       alert(err.response?.data?.message || "Invalid credentials");
     }
