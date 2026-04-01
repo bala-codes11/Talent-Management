@@ -1,114 +1,278 @@
+const mongoose = require("mongoose");
 const Task = require("../models/Task");
+const TaskAssignment = require("../models/TaskAssignment");
 
+// 👑 ADMIN CHECK HELPER
+const isAdmin = (req, res) => {
+  if (req.user.role !== "admin") {
+    res.status(403).json({ message: "Access denied. Admin only." });
+    return false;
+  }
+  return true;
+};
 
-// ✅ CREATE TASK
-exports.createTask = async (req, res) => {
+// ✅ CREATE TASK (ADMIN ONLY)
+exports.createTask = async (req, res, next) => {
   try {
-    const { title, description, status } = req.body;
+    if (!isAdmin(req, res)) return;
 
-    // Validation
-    if (!title) {
-      return res.status(400).json({ message: "Title is required" });
+    const { title, description, assignedTo, deadline } = req.body;
+    if (!title || typeof title !== "string") {
+      return res.status(400).json({ message: "Valid title required" });
     }
 
-    const task = await Task.create({
-      title,
-      description,
-      status,
-      user: req.user.id,
+    if (!Array.isArray(assignedTo) || assignedTo.length === 0) {
+      return res.status(400).json({ message: "Assign at least one user" });
+    }
+
+const task = await Task.create({
+  title,
+  description,
+  deadline: deadline ? new Date(deadline) : null, // ✅ FIX
+  createdBy: req.user.id,
+});
+
+    const assignments = assignedTo.map((userId) => ({
+      taskId: task._id,
+      userId,
+    }));
+
+    await TaskAssignment.insertMany(assignments);
+
+    res.status(201).json({
+      message: "Task created & assigned successfully",
+      task,
     });
 
-    res.status(201).json(task);
-
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error creating task" });
+    next(err);
   }
 };
 
-
-
-// ✅ GET ALL TASKS (ONLY USER'S TASKS)
-exports.getTasks = async (req, res) => {
+// ✅ GET ALL TASKS (ADMIN ONLY)
+exports.getAllTasks = async (req, res, next) => {
   try {
-    const tasks = await Task.find({ user: req.user.id }).sort({ createdAt: -1 });
+    if (!isAdmin(req, res)) return;
 
-    res.status(200).json(tasks);
+    const assignments = await TaskAssignment.find()
+      .populate("taskId", "title description deadline createdAt")
+      .populate("userId", "name email role")
+      .sort({ createdAt: -1 });
+
+    const groupedTasks = {};
+
+    assignments.forEach((a) => {
+      if (!a.taskId || !a.userId) return;
+
+      const taskId = a.taskId._id.toString();
+
+      if (!groupedTasks[taskId]) {
+        groupedTasks[taskId] = {
+          task: a.taskId,
+          users: [],
+        };
+      }
+
+      groupedTasks[taskId].users.push({
+        user: a.userId,
+        status: a.status,
+        submission: a.submission,
+      });
+    });
+
+    res.json(Object.values(groupedTasks));
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error fetching tasks" });
+    next(err);
   }
 };
-
-
-
-// ✅ GET SINGLE TASK
-exports.getTaskById = async (req, res) => {
+exports.updateTask = async (req, res, next) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      user: req.user.id,
-    });
+    if (!isAdmin(req, res)) return;
+
+    const { title, description, assignedTo, deadline } = req.body;
+
+    const task = await Task.findByIdAndUpdate(
+      req.params.id,
+      {
+        title,
+        description,
+        deadline: deadline ? new Date(deadline) : null, // ✅ update deadline
+      },
+      { new: true }
+    );
 
     if (!task) {
       return res.status(404).json({ message: "Task not found" });
     }
 
-    res.status(200).json(task);
+    // 🔥 Optional: Update assignments also
+    if (assignedTo && assignedTo.length > 0) {
+      await TaskAssignment.deleteMany({ taskId: task._id });
+
+      const assignments = assignedTo.map((userId) => ({
+        taskId: task._id,
+        userId,
+      }));
+
+      await TaskAssignment.insertMany(assignments);
+    }
+
+    res.json({
+      message: "Task updated successfully",
+      task,
+    });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error fetching task" });
+    next(err);
   }
 };
 
-
-
-// ✅ UPDATE TASK (SECURE)
-exports.updateTask = async (req, res) => {
+// ✅ DELETE TASK (ADMIN ONLY)
+exports.deleteTask = async (req, res, next) => {
   try {
-    const { title, description, status } = req.body;
+    if (!isAdmin(req, res)) return;
 
-    const task = await Task.findOneAndUpdate(
+    const taskId = req.params.id;
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res.status(400).json({ message: "Invalid task ID" });
+    }
+
+    const task = await Task.findById(taskId);
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    await Task.findByIdAndDelete(taskId);
+    await TaskAssignment.deleteMany({ taskId });
+
+    res.json({ message: "Task deleted successfully" });
+
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ✅ COMPLETE TASK (ADMIN ONLY)
+exports.completeTask = async (req, res, next) => {
+  try {
+    if (!isAdmin(req, res)) return;
+
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ message: "User ID required" });
+    }
+
+    const assignment = await TaskAssignment.findOneAndUpdate(
       {
-        _id: req.params.id,
-        user: req.user.id, // 🔥 important security
+        taskId: req.params.id,
+        userId,
       },
-      { title, description, status },
+      { status: "completed" },
       { new: true }
     );
 
-    if (!task) {
-      return res.status(404).json({ message: "Task not found or unauthorized" });
+    if (!assignment) {
+      return res.status(404).json({ message: "Assignment not found" });
     }
 
-    res.status(200).json(task);
+    res.json({
+      message: "Task marked as completed",
+      assignment,
+    });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error updating task" });
+    next(err);
   }
 };
 
-
-
-// ✅ DELETE TASK (SECURE)
-exports.deleteTask = async (req, res) => {
+// 👤 USER: SUBMIT TASK
+exports.submitTask = async (req, res, next) => {
   try {
-    const task = await Task.findOneAndDelete({
-      _id: req.params.id,
-      user: req.user.id, // 🔥 important security
-    });
+    const { text } = req.body;
 
-    if (!task) {
-      return res.status(404).json({ message: "Task not found or unauthorized" });
+    if (!text || text.trim() === "") {
+      return res.status(400).json({ message: "Submission cannot be empty" });
     }
 
-    res.status(200).json({ message: "Task deleted successfully" });
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid task ID" });
+    }
+
+    const assignment = await TaskAssignment.findOneAndUpdate(
+      {
+        taskId: req.params.id,
+        userId: req.user.id,
+      },
+      {
+        submission: {
+          text,
+          submittedAt: new Date(),
+        },
+        status: "under_review",
+      },
+      { new: true }
+    );
+
+    if (!assignment) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+
+    res.json({
+      message: "Task submitted successfully",
+      assignment,
+    });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error deleting task" });
+    next(err);
+  }
+};
+
+// 👤 USER: GET MY TASKS
+exports.getMyTasks = async (req, res, next) => {
+  try {
+    const assignments = await TaskAssignment.find({
+      userId: req.user.id,
+    })
+      .populate("taskId", "title description deadline createdAt")
+      .sort({ createdAt: -1 });
+
+    res.json(assignments);
+
+  } catch (err) {
+    next(err);
+  }
+};
+
+// 👤 USER: UPDATE STATUS
+exports.updateStatus = async (req, res, next) => {
+  try {
+    const { status } = req.body;
+
+    const validStatuses = ["pending", "under_review", "completed"];
+
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const assignment = await TaskAssignment.findOneAndUpdate(
+      {
+        taskId: req.params.id,
+        userId: req.user.id,
+      },
+      { status },
+      { new: true }
+    );
+
+    if (!assignment) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+
+    res.json(assignment);
+
+  } catch (err) {
+    next(err);
   }
 };
