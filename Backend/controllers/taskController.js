@@ -86,48 +86,35 @@ exports.getAllTasks = async (req, res, next) => {
     next(err);
   }
 };
-exports.updateTask = async (req, res, next) => {
+exports.updateStatus = async (req, res, next) => {
   try {
-    if (!isAdmin(req, res)) return;
+    const { status } = req.body;
 
-    const { title, description, assignedTo, deadline } = req.body;
+    const validStatuses = ["pending", "under_review", "completed"];
 
-    const task = await Task.findByIdAndUpdate(
-      req.params.id,
-      {
-        title,
-        description,
-        deadline: deadline ? new Date(deadline) : null, // ✅ update deadline
-      },
-      { new: true }
-    );
-
-    if (!task) {
-      return res.status(404).json({ message: "Task not found" });
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
     }
 
-    // 🔥 Optional: Update assignments also
-    if (assignedTo && assignedTo.length > 0) {
-      await TaskAssignment.deleteMany({ taskId: task._id });
-
-      const assignments = assignedTo.map((userId) => ({
-        taskId: task._id,
-        userId,
-      }));
-
-      await TaskAssignment.insertMany(assignments);
-    }
-
-    res.json({
-      message: "Task updated successfully",
-      task,
+    const assignment = await TaskAssignment.findOne({
+      taskId: req.params.id,
+      userId: req.user.id,
     });
+
+    if (!assignment) {
+      return res.status(404).json({ message: "Assignment not found" });
+    }
+
+    // ✅ update status properly
+    assignment.status = status;
+    await assignment.save(); // 🔥 updates updatedAt
+
+    res.json(assignment);
 
   } catch (err) {
     next(err);
   }
 };
-
 // ✅ DELETE TASK (ADMIN ONLY)
 exports.deleteTask = async (req, res, next) => {
   try {
@@ -165,18 +152,18 @@ exports.completeTask = async (req, res, next) => {
       return res.status(400).json({ message: "User ID required" });
     }
 
-    const assignment = await TaskAssignment.findOneAndUpdate(
-      {
-        taskId: req.params.id,
-        userId,
-      },
-      { status: "completed" },
-      { new: true }
-    );
+    const assignment = await TaskAssignment.findOne({
+      taskId: req.params.id,
+      userId,
+    });
 
     if (!assignment) {
       return res.status(404).json({ message: "Assignment not found" });
     }
+
+    // ✅ update status + trigger updatedAt automatically
+    assignment.status = "completed";
+    await assignment.save(); // 🔥 IMPORTANT (updates updatedAt)
 
     res.json({
       message: "Task marked as completed",
@@ -197,28 +184,23 @@ exports.submitTask = async (req, res, next) => {
       return res.status(400).json({ message: "Submission cannot be empty" });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ message: "Invalid task ID" });
-    }
-
-    const assignment = await TaskAssignment.findOneAndUpdate(
-      {
-        taskId: req.params.id,
-        userId: req.user.id,
-      },
-      {
-        submission: {
-          text,
-          submittedAt: new Date(),
-        },
-        status: "under_review",
-      },
-      { new: true }
-    );
+    const assignment = await TaskAssignment.findOne({
+      taskId: req.params.id,
+      userId: req.user.id,
+    });
 
     if (!assignment) {
       return res.status(404).json({ message: "Assignment not found" });
     }
+
+    assignment.submission = {
+      text,
+      submittedAt: new Date(),
+    };
+
+    assignment.status = "under_review";
+
+    await assignment.save(); // ✅ ensures updatedAt updates
 
     res.json({
       message: "Task submitted successfully",
@@ -245,32 +227,30 @@ exports.getMyTasks = async (req, res, next) => {
     next(err);
   }
 };
-
-// 👤 USER: UPDATE STATUS
-exports.updateStatus = async (req, res, next) => {
+exports.updateTask = async (req, res, next) => {
   try {
-    const { status } = req.body;
+    if (!isAdmin(req, res)) return;
 
-    const validStatuses = ["pending", "under_review", "completed"];
+    const { title, description, deadline } = req.body;
 
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
-    const assignment = await TaskAssignment.findOneAndUpdate(
+    const task = await Task.findByIdAndUpdate(
+      req.params.id,
       {
-        taskId: req.params.id,
-        userId: req.user.id,
+        title,
+        description,
+        deadline: deadline ? new Date(deadline) : null,
       },
-      { status },
       { new: true }
     );
 
-    if (!assignment) {
-      return res.status(404).json({ message: "Assignment not found" });
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
     }
 
-    res.json(assignment);
+    res.json({
+      message: "Task updated successfully",
+      task,
+    });
 
   } catch (err) {
     next(err);
